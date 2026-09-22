@@ -24,6 +24,7 @@
 // See ./host.js: reading an unwired hook THROWS, and tests/js/host_contract.test.js
 // fails CI if the hooks used here and the hooks app.js wires ever drift apart.
 import { audio } from './audio-el.js';
+import { browserAudioUrl } from './browser-audio-url.js';
 import { _audioSeek, _songEventPayload, jucePlayer, setPlayButtonState } from './transport.js';
 import { setSpeed } from './player-controls.js';
 import { S } from './player-state.js';
@@ -170,7 +171,7 @@ import { S } from './player-state.js';
                 // clears it — re-point + load before resuming so a bounced
                 // reroute doesn't try to play() an empty element.
                 if (S.isPlaying && !_isStale(songAudio)) {
-                    if (!audio.src) { audio.src = url; audio.load(); }
+                    if (!audio.src) { audio.src = browserAudioUrl(url); audio.load(); }
                     try { await audio.play(); } catch (_) { /* ignore */ }
                 }
                 window.feedBack?.playback?.recordRouteChange?.({
@@ -242,7 +243,7 @@ import { S } from './player-state.js';
             // so the caller logs it. The caller does NOT memoise this URL —
             // transient failures must retry on the next poll.
             if (S.isPlaying && !window._juceMode && !_isStale(songAudio)) {
-                if (!audio.src) { audio.src = url; audio.load(); }
+                if (!audio.src) { audio.src = browserAudioUrl(url); audio.load(); }
                 try { await audio.play(); } catch (_) { /* ignore */ }
             }
             window.feedBack?.playback?.recordRouteChange?.({
@@ -300,7 +301,7 @@ import { S } from './player-state.js';
             if (_isStale(songAudio)) return;           // song changed mid-pause
             window._juceMode = false;
             window._juceAudioUrl = null;
-            audio.src = url;
+            audio.src = browserAudioUrl(url);
             audio.load();
             const _spSlider = document.getElementById?.('speed-slider');
             if (_spSlider) setSpeed(_spSlider.value / 100);
