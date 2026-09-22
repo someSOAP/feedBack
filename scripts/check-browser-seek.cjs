@@ -1,5 +1,7 @@
 // Real decoder regression probe (not a fake currentTime test).
-// npm install; node scripts/check-browser-seek.cjs 'http://localhost:8000/api/sloppak/SONG.feedpak/file/stems/full.ogg?playback=pcm'
+// npm install; node scripts/check-browser-seek.cjs 'http://localhost:8000/api/sloppak/SONG.feedpak/file/stems/full.ogg?playback=webm'
+// Optional second URL: original decoded WAV reference, to detect a constant
+// timeline shift introduced by repackaging as well as seek-dependent drift.
 // Set SEEK_BROWSER_EXECUTABLE to test a specific Chrome binary in a disposable
 // profile. No access to an existing browser profile; output is silent.
 const { chromium } = require('playwright');
@@ -8,8 +10,12 @@ async function main() {
     const input = process.argv[2];
     if (!input) throw new Error('Pass a local feedBack audio URL (a song longer than 105 seconds).');
     const url = new URL(input);
-    if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
-        throw new Error('This diagnostic accepts only a local feedBack server.');
+    const referenceUrl = new URL(process.argv[3] || input);
+    for (const candidate of [url, referenceUrl]) {
+        if (!['http:', 'https:'].includes(candidate.protocol)
+                || !['localhost', '127.0.0.1', '[::1]'].includes(candidate.hostname)) {
+            throw new Error('This diagnostic accepts only a local feedBack server.');
+        }
     }
     const browser = await chromium.launch({
         executablePath: process.env.SEEK_BROWSER_EXECUTABLE || undefined,
@@ -21,10 +27,10 @@ async function main() {
             contentType: 'text/html', body: '<!doctype html><audio id="audio"></audio>',
         }));
         await page.goto(url.origin + '/seek-clock-probe');
-        const results = await page.evaluate(async input => {
+        const results = await page.evaluate(async ({ input, referenceUrl }) => {
             const audio = document.getElementById('audio');
             const ctx = new AudioContext({ sampleRate: 48000 });
-            const decoded = await ctx.decodeAudioData(await (await fetch(input)).arrayBuffer());
+            const decoded = await ctx.decodeAudioData(await (await fetch(referenceUrl)).arrayBuffer());
             const reference = decoded.getChannelData(0);
             const workletUrl = URL.createObjectURL(new Blob([`
                 class Probe extends AudioWorkletProcessor {
@@ -96,7 +102,7 @@ async function main() {
             audio.pause();
             await ctx.close();
             return results;
-        }, url.href);
+        }, { input: url.href, referenceUrl: referenceUrl.href });
         console.log(JSON.stringify(results, null, 2));
         if (results.some(r => r.offsetMs === null)) throw new Error('Inconclusive: silence or no reliable PCM match. Try another song.');
         const offsets = results.map(r => r.offsetMs);

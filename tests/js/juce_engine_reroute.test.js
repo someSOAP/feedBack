@@ -84,7 +84,7 @@ function makeSandbox({ isAudioRunning, loadBackingTrack, outputType = 'Windows A
             ok: true,
             json: () => Promise.resolve({ path: '/local/song.ogg' }),
         }),
-        document: { hidden: false },
+        document: { hidden: false, createElement: () => ({ canPlayType: () => 'probably' }) },
         // `isPlaying` moved onto the shared player-state container so a carved module
         // can WRITE it (an imported binding is read-only). The sliced code now reads and
         // writes S.isPlaying, so the sandbox provides the same container — the
@@ -148,7 +148,7 @@ test('engine stopped while on JUCE → migrates the song back to HTML5', async (
 
     assert.equal(sb.window._juceMode, false, 'should have switched out of JUCE mode');
     assert.equal(sb.window._juceAudioUrl, null);
-    assert.equal(sb.audio.src, '/audio/song.ogg?playback=pcm', 'HTML5 uses the seek-stable copy');
+    assert.equal(sb.audio.src, '/audio/song.ogg?playback=webm', 'HTML5 uses the seek-stable copy');
 });
 
 test('routing already consistent → no-op', async () => {
@@ -250,7 +250,7 @@ test('feedpak on JUCE + output leaves exclusive mode → migrates back to HTML5'
     type = 'Windows Audio';
     await sb.window._reevaluateJuceRouting();
     assert.equal(sb.window._juceMode, false, 'returned to HTML5 after leaving exclusive mode');
-    assert.equal(sb.audio.src, url + '?playback=pcm', 'HTML5 uses the seek-stable copy');
+    assert.equal(sb.audio.src, url + '?playback=webm', 'HTML5 uses the seek-stable copy');
 });
 
 test('JUCE hard-reject is memoised → not retried on the next poll', async () => {

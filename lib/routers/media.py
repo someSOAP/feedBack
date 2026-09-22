@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 import appstate
 import sloppak as sloppak_mod
 from dlc_paths import _get_dlc_dir, _resolve_dlc_path
-from browser_audio import browser_pcm_copy
+from browser_audio import browser_playback_copy
 
 import logging
 log = logging.getLogger("feedBack.server")
@@ -74,9 +74,9 @@ def serve_sloppak_file(filename: str, rel_path: str, playback: str | None = None
         error, status = result
         return JSONResponse({"error": error}, status)
     target = result
-    if playback == "pcm":
+    if playback in ("pcm", "webm"):
         try:
-            target = browser_pcm_copy(target, appstate.audio_cache_dir)
+            target = browser_playback_copy(target, appstate.audio_cache_dir, prefer_webm=playback == "webm")
         except (OSError, RuntimeError, subprocess.SubprocessError):
             log.warning("Could not prepare seek-stable browser audio", exc_info=True)
             return JSONResponse({"error": "Could not prepare seek-stable browser audio"}, 503)
@@ -84,7 +84,7 @@ def serve_sloppak_file(filename: str, rel_path: str, playback: str | None = None
     mt = {
         ".ogg": "audio/ogg", ".opus": "audio/ogg", ".oga": "audio/ogg",
         ".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac",
-        ".m4a": "audio/mp4",
+        ".m4a": "audio/mp4", ".webm": "audio/webm",
         ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".png": "image/png", ".webp": "image/webp",
         ".json": "application/json",
@@ -166,11 +166,11 @@ def serve_audio(filename: str, playback: str | None = None):
         except ValueError:
             continue
         if candidate.is_file():
-            if playback == "pcm":
+            if playback in ("pcm", "webm"):
                 try:
-                    candidate = browser_pcm_copy(candidate, appstate.audio_cache_dir)
+                    candidate = browser_playback_copy(candidate, appstate.audio_cache_dir, prefer_webm=playback == "webm")
                 except (OSError, RuntimeError, subprocess.SubprocessError):
                     log.warning("Could not prepare seek-stable browser audio", exc_info=True)
                     return JSONResponse({"error": "Could not prepare seek-stable browser audio"}, 503)
-            return FileResponse(str(candidate))
+            return FileResponse(str(candidate), media_type="audio/webm" if candidate.suffix == ".webm" else None)
     return JSONResponse({"error": "not found"}, status_code=404)

@@ -26,3 +26,28 @@ test('preserves query and fragment and does not accumulate flags', () => {
     assert.equal(url(input), expected);
     assert.equal(url(expected), expected);
 });
+
+for (const support of ['probably', 'maybe', '', 'no']) {
+    test(`selects a supported format (canPlayType=${JSON.stringify(support)})`, () => {
+        let probes = 0;
+        const browser = { URLSearchParams, document: { createElement(tag) {
+            probes++;
+            assert.equal(tag, 'audio');
+            return { canPlayType(type) {
+                assert.equal(type, 'audio/webm; codecs="vorbis"');
+                return support;
+            } };
+        } } };
+        vm.createContext(browser);
+        vm.runInContext(source.replace('export function', 'function'), browser);
+        const format = ['probably', 'maybe'].includes(support) ? 'webm' : 'pcm';
+        assert.equal(browser.browserAudioUrl('/audio/song.ogg?v=3#part'),
+            `/audio/song.ogg?v=3&playback=${format}#part`);
+        assert.equal(browser.browserAudioUrl(`/audio/song.OGG?playback=${format}`),
+            `/audio/song.OGG?playback=${format}`);
+        assert.equal(browser.browserAudioUrl('/api/sloppak/song.feedpak/file/full.oga'),
+            `/api/sloppak/song.feedpak/file/full.oga?playback=${format}`);
+        assert.equal(browser.browserAudioUrl('/audio/song.opus'), `/audio/song.opus?playback=${format}`);
+        assert.equal(probes, 1, 'capability probe is cached');
+    });
+}

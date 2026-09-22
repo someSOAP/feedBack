@@ -313,14 +313,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine (`app.js`, `highway.js`, `playSong`, `showScreen`, the capability registry).
 
 ### Fixed
-- **Browser section/arrow seeks use a seek-stable PCM playback copy for Ogg audio.**
+- **Browser section/arrow seeks use seek-stable playback copies for Ogg audio.**
   Chromium can play different PCM positions after compressed-audio seeks than
-  during uninterrupted playback. The browser now requests a cached WAV decoded
-  from the beginning, retaining HTML5 playback speed/pitch controls. Original
-  recordings, native JUCE playback, plugin assets, and A/V calibration are unchanged.
-  Copies are generated on demand under the audio cache (`browser-pcm/`), support
-  byte-range requests, and are invalidated when the source changes. Requires FFmpeg
-  and trades additional cache space for stable sample-addressed seeking.
+  during uninterrupted playback. Supporting browsers now request a cached WebM
+  stream copy of Vorbis audio (no re-encoding), with decoded WAV as the fallback
+  for other codecs, unsupported browsers, or failed remuxes. HTML5 playback
+  speed/pitch controls are retained. Original recordings, native JUCE playback,
+  plugin assets, and A/V calibration are unchanged.
+  Copies are generated on demand under the audio cache (`browser-webm/` or
+  `browser-pcm/`), support byte-range requests, and are invalidated when the source
+  changes. Requires FFmpeg. WebM retains near-original compressed size instead
+  of full-size PCM.
 - **Count-in follows the song's meter and its pickup measure.** The count-in
   (loop wrap, section practice, and the "Countdown before song" setting) always
   clicked exactly four beats, so a 3/4 song was counted in 4/4, and a song
