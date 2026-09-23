@@ -2,6 +2,7 @@
 
 import concurrent.futures
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,11 +15,13 @@ from routers import media
 
 @pytest.fixture
 def decoder(tmp_path, monkeypatch):
+    """Provide a source and a fake decoder that publishes complete audio files."""
     source = tmp_path / "song.ogg"
     source.write_bytes(b"original compressed recording")
     calls = []
 
     def decode(args, **kwargs):
+        """Write a format marker to the requested temporary output."""
         calls.append((args, kwargs))
         # The cache publishes only a finished file, not this temporary output.
         prefix = b"\x1aE\xdf\xa3" if args[args.index("-f") + 1] == "webm" else b"RIFF"
@@ -30,6 +33,7 @@ def decoder(tmp_path, monkeypatch):
 
 
 def test_cache_is_reused_without_changing_original(decoder):
+    """Reuse the decoded WAV while leaving the recording unchanged."""
     source, cache, calls = decoder
     result = browser_audio.browser_playback_copy(source, cache)
     assert result.suffix == ".wav"
@@ -44,6 +48,7 @@ def test_cache_is_reused_without_changing_original(decoder):
 
 
 def test_changed_source_gets_new_cache_entry(decoder):
+    """Include the source version in the cache key."""
     source, cache, calls = decoder
     first = browser_audio.browser_playback_copy(source, cache)
     source.write_bytes(b"replacement recording of a different length")
@@ -52,6 +57,7 @@ def test_changed_source_gets_new_cache_entry(decoder):
 
 
 def test_concurrent_requests_decode_once(decoder):
+    """Concurrent requests for one song should share a conversion."""
     source, cache, calls = decoder
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda _: browser_audio.browser_playback_copy(source, cache), range(4)))
@@ -59,10 +65,89 @@ def test_concurrent_requests_decode_once(decoder):
     assert len(calls) == 1
 
 
+def test_cached_song_stays_available_during_another_conversion(decoder, monkeypatch):
+    """A slow conversion must not block requests for an already cached song."""
+    source, cache, _ = decoder
+    cached = browser_audio.browser_playback_copy(source, cache)
+    other = source.with_name("other.ogg")
+    other.write_bytes(b"other compressed recording")
+    decode = browser_audio.subprocess.run
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_decode(args, **kwargs):
+        """Pause only the new song's conversion."""
+        if args[args.index("-i") + 1] == str(other):
+            started.set()
+            assert release.wait(5)
+        return decode(args, **kwargs)
+
+    monkeypatch.setattr(browser_audio.subprocess, "run", slow_decode)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        converting = pool.submit(browser_audio.browser_playback_copy, other, cache)
+        try:
+            assert started.wait(5)
+            hit = pool.submit(browser_audio.browser_playback_copy, source, cache)
+            assert hit.result(timeout=2) == cached
+        finally:
+            release.set()
+        assert converting.result(timeout=5).is_file()
+
+
+def test_different_songs_convert_concurrently(decoder, monkeypatch):
+    """A conversion for one song must not stall a second uncached song."""
+    source, cache, _ = decoder
+    other = source.with_name("other.ogg")
+    other.write_bytes(b"another recording")
+    decode = browser_audio.subprocess.run
+    started = {str(path): threading.Event() for path in (source, other)}
+    release = threading.Event()
+
+    def waiting_decode(args, **kwargs):
+        """Wait until both source conversions have reached the decoder."""
+        started[args[args.index("-i") + 1]].set()
+        assert release.wait(5)
+        return decode(args, **kwargs)
+
+    monkeypatch.setattr(browser_audio.subprocess, "run", waiting_decode)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(browser_audio.browser_playback_copy, source, cache)
+        second = pool.submit(browser_audio.browser_playback_copy, other, cache)
+        try:
+            assert all(event.wait(2) for event in started.values())
+        finally:
+            release.set()
+        assert first.result(timeout=5).is_file()
+        assert second.result(timeout=5).is_file()
+
+
+def test_browser_copies_are_evicted_across_formats(vorbis, monkeypatch):
+    """Keep the browser cache bounded without deleting direct audio files."""
+    source, cache, _ = vorbis
+    monkeypatch.setattr(browser_audio, "_MAX_BROWSER_COPIES", 2)
+    cache.mkdir()
+    direct = cache / "audio_original.ogg"
+    direct.write_bytes(b"original")
+    first = browser_audio.browser_playback_copy(source, cache)
+    temporary = cache / "browser-pcm" / "tmp-in-progress.wav"
+    temporary.write_bytes(b"unfinished")
+    second = browser_audio.browser_playback_copy(source, cache, prefer_webm=True)
+    source.write_bytes(source.read_bytes() + b"new version")
+    newest = browser_audio.browser_playback_copy(source, cache)
+    copies = [path for path in (cache / "browser-pcm").glob("*.wav") if path != temporary]
+    copies += list((cache / "browser-webm").glob("*.webm"))
+    assert len(copies) == 2
+    assert newest in copies
+    assert direct.read_bytes() == b"original"
+    assert temporary.read_bytes() == b"unfinished"
+
+
 def test_failed_conversion_leaves_no_partial_cache(decoder, monkeypatch):
+    """A timeout must remove the temporary audio output."""
     source, cache, _ = decoder
 
     def fail(*args, **kwargs):
+        """Simulate a decoder timeout."""
         raise subprocess.TimeoutExpired("ffmpeg", 120)
 
     monkeypatch.setattr(browser_audio.subprocess, "run", fail)
@@ -72,6 +157,7 @@ def test_failed_conversion_leaves_no_partial_cache(decoder, monkeypatch):
 
 
 def test_other_file_types_do_not_need_ffmpeg(tmp_path, monkeypatch):
+    """Pass through formats outside the Ogg family without conversion."""
     monkeypatch.setattr(browser_audio, "_ffmpeg_cmd", lambda: None)
     source = tmp_path / "original.wav"
     assert browser_audio.browser_playback_copy(source, tmp_path) == source
@@ -79,12 +165,14 @@ def test_other_file_types_do_not_need_ffmpeg(tmp_path, monkeypatch):
 
 @pytest.fixture
 def vorbis(decoder):
+    """Provide an Ogg source with a Vorbis identification page."""
     source, cache, calls = decoder
     source.write_bytes(b"OggS\x00\x02" + b"\x00" * 20 + b"\x01\x1e\x01vorbis" + b"\x00" * 23)
     return source, cache, calls
 
 
 def test_webm_copies_packets_and_reuses_cache(vorbis):
+    """Remux Vorbis once without changing its compressed packets."""
     source, cache, calls = vorbis
     original = source.read_bytes()
     result = browser_audio.browser_playback_copy(source, cache, prefer_webm=True)
@@ -101,6 +189,7 @@ def test_webm_copies_packets_and_reuses_cache(vorbis):
 
 
 def test_webm_cache_invalidates_on_source_change(vorbis):
+    """Rebuild WebM when the source file changes."""
     source, cache, calls = vorbis
     first = browser_audio.browser_playback_copy(source, cache, prefer_webm=True)
     source.write_bytes(source.read_bytes() + b"changed")
@@ -109,6 +198,7 @@ def test_webm_cache_invalidates_on_source_change(vorbis):
 
 
 def test_concurrent_webm_requests_remux_once(vorbis):
+    """Concurrent WebM requests should publish one copy."""
     source, cache, calls = vorbis
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(
@@ -120,6 +210,7 @@ def test_concurrent_webm_requests_remux_once(vorbis):
 @pytest.mark.parametrize("content", [b"", b"OggS", b"OggS\x00\x02" + b"\x00" * 20 + b"\x01\x13OpusHead",
                                      b"unrecognized recording"])
 def test_unknown_or_opus_headers_use_wav(decoder, content):
+    """Use PCM when a safe Vorbis remux cannot be established."""
     source, cache, calls = decoder
     source.write_bytes(content)
     assert browser_audio.browser_playback_copy(source, cache, prefer_webm=True).suffix == ".wav"
@@ -129,11 +220,13 @@ def test_unknown_or_opus_headers_use_wav(decoder, content):
 
 @pytest.mark.parametrize("failure", ["error", "timeout", "empty"])
 def test_remux_failure_caches_wav_fallback(vorbis, monkeypatch, failure):
+    """A failed remux should publish and reuse a WAV fallback."""
     source, cache, calls = vorbis
     convert = browser_audio.subprocess.run
     attempts = []
 
     def fail_remux(args, **kwargs):
+        """Fail WebM creation while allowing the WAV decode."""
         attempts.append(args)
         if args[args.index("-f") + 1] == "webm":
             Path(args[-1]).write_bytes(b"partial")
@@ -153,9 +246,11 @@ def test_remux_failure_caches_wav_fallback(vorbis, monkeypatch, failure):
 
 
 def test_both_conversions_failing_leaves_no_partial_files(vorbis, monkeypatch):
+    """Do not publish partial output when both formats fail."""
     source, cache, _ = vorbis
 
     def fail(args, **kwargs):
+        """Simulate a decoder that writes partial output before failing."""
         Path(args[-1]).write_bytes(b"partial")
         raise subprocess.CalledProcessError(1, "ffmpeg")
 
@@ -167,6 +262,7 @@ def test_both_conversions_failing_leaves_no_partial_files(vorbis, monkeypatch):
 
 @pytest.fixture
 def client(decoder, monkeypatch, tmp_path):
+    """Exercise both media routes against a local test recording."""
     source, cache, _ = decoder
     monkeypatch.setattr(media, "_resolve_sloppak_local_file", lambda *args: source)
     monkeypatch.setattr(media.appstate, "audio_cache_dir", cache)
@@ -179,6 +275,7 @@ def client(decoder, monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("url", ["/audio/song.ogg", "/api/sloppak/song.feedpak/file/stems/full.ogg"])
 def test_pcm_is_opt_in_and_supports_range_requests(client, decoder, url):
+    """Serve original audio by default and byte ranges for the PCM copy."""
     original = client.get(url)
     assert original.content == b"original compressed recording"
     result = client.get(url + "?playback=pcm")
@@ -192,21 +289,25 @@ def test_pcm_is_opt_in_and_supports_range_requests(client, decoder, url):
 
 @pytest.mark.parametrize("playback", ["pcm", "webm"])
 def test_resolution_error_never_reaches_decoder(client, monkeypatch, decoder, playback):
+    """Reject an unsafe sloppak path before requesting conversion."""
     monkeypatch.setattr(media, "_resolve_sloppak_local_file", lambda *args: ("forbidden", 403))
     assert client.get(f"/api/sloppak/song.feedpak/file/stems/full.ogg?playback={playback}").status_code == 403
     assert decoder[2] == []
 
 
 @pytest.mark.parametrize("playback", ["pcm", "webm"])
-def test_conversion_failure_is_reported_without_serving_bad_audio(client, monkeypatch, playback):
+@pytest.mark.parametrize("url", ["/audio/song.ogg", "/api/sloppak/song.feedpak/file/stems/full.ogg"])
+def test_conversion_failure_serves_original_audio(client, monkeypatch, playback, url):
+    """Missing FFmpeg must not make an otherwise playable song silent."""
     monkeypatch.setattr(browser_audio, "_ffmpeg_cmd", lambda: None)
-    response = client.get(f"/audio/song.ogg?playback={playback}")
-    assert response.status_code == 503
-    assert response.json() == {"error": "Could not prepare seek-stable browser audio"}
+    response = client.get(f"{url}?playback={playback}")
+    assert response.status_code == 200
+    assert response.content == b"original compressed recording"
 
 
 @pytest.mark.parametrize("url", ["/audio/song.ogg", "/api/sloppak/song.feedpak/file/stems/full.ogg"])
 def test_webm_is_opt_in_and_range_seekable(client, vorbis, url):
+    """Serve byte ranges from a remuxed WebM copy."""
     source, _, calls = vorbis
     assert client.get(url).content == source.read_bytes()
     result = client.get(url + "?playback=webm")
@@ -219,6 +320,7 @@ def test_webm_is_opt_in_and_range_seekable(client, vorbis, url):
 
 
 def test_webm_request_can_return_wav(client):
+    """Use WAV for Ogg content that cannot be safely remuxed."""
     result = client.get("/audio/song.ogg?playback=webm")
     assert result.headers["content-type"] in ("audio/wav", "audio/x-wav", "audio/vnd.wave")
     assert result.content.startswith(b"RIFF")
@@ -226,6 +328,7 @@ def test_webm_request_can_return_wav(client):
 
 @pytest.mark.parametrize("playback", ["pcm", "webm"])
 def test_audio_traversal_rejected_before_conversion(client, decoder, playback):
+    """Reject path traversal before touching the decoder."""
     result = client.get(f"/audio/%2e%2e/song.ogg?playback={playback}")
     assert result.status_code == 404
     assert decoder[2] == []

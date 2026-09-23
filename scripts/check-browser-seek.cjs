@@ -6,6 +6,7 @@
 // profile. No access to an existing browser profile; output is silent.
 const { chromium } = require('playwright');
 
+/** Compare browser output with decoded PCM across continuous play and seeks. */
 async function main() {
     const input = process.argv[2];
     if (!input) throw new Error('Pass a local feedBack audio URL (a song longer than 105 seconds).');
@@ -64,6 +65,7 @@ async function main() {
             await audio.play();
             const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
             const results = [];
+            /** Correlate recent playback samples with the decoded reference. */
             async function measure(label) {
                 records = [];
                 await wait(1200);

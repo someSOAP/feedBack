@@ -70,6 +70,7 @@ import {
     strumGroupBuckets,
 } from './js/highway-draw.js';
 
+/** Create one highway renderer with its own playback and chart state. */
 function createHighway() {
   // R3c: per-instance mutable state in one object, so extracted renderer/ws
   // modules can close over it as a factory arg without cross-panel sharing.

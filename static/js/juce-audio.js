@@ -132,6 +132,7 @@ import { S } from './player-state.js';
     //   'rejected' — JUCE hard-rejected the track (codec). Caller memoises it.
     //   'stale'    — the loaded song changed mid-flight; aborted, NOT memoised.
     // (a transient transport-start failure throws instead — also not memoised.)
+    /** Move the current song to native audio when its output becomes exclusive. */
     async function _switchHtml5ToJuce(songAudio) {
         const url = songAudio.url;
         const wasPlaying = S.isPlaying;
@@ -268,6 +269,7 @@ import { S } from './player-state.js';
         }
     }
 
+    /** Restore browser audio at the native transport position. */
     async function _switchJuceToHtml5(songAudio) {
         const url = songAudio.url;
         const wasPlaying = S.isPlaying;

@@ -2,6 +2,7 @@
 // and plugin stem URLs pointing at the original recording.
 let supportsVorbisWebm;
 
+/** Select a seek-stable browser copy for local Ogg audio URLs. */
 export function browserAudioUrl(url) {
     if (typeof url !== 'string') return url;
     const [pathAndQuery, fragment] = url.split('#', 2);

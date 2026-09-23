@@ -67,14 +67,18 @@ For WebM requests, an Ogg Vorbis identification header enables an FFmpeg stream
 copy (`-map 0:a:0 -c:a copy -f webm`): no re-encoding, resampling, or intentional
 timeline adjustment. Opus and unrecognized headers use full-file PCM decoding.
 A failed remux also falls back to WAV, caching that fallback so subsequent
-range requests do not repeat the failed conversion. If WAV preparation also
-fails, return 503 rather than silently serving the problematic original Ogg.
+range requests do not repeat the failed conversion. If conversion cannot
+produce either format, the media routes serve the original Ogg so playback
+remains available, though the reported seek drift may recur for that song.
 
 The cache is `audio_cache_dir/browser-webm/` (WebM or fallback WAV) or the
 backwards-compatible `browser-pcm/` (explicit PCM requests). Keys include source
 path, size, nanosecond modification time, and conversion version. Publication
 is atomic; concurrent requests reuse one conversion. FFmpeg is required; no
-new binary or Python dependency is needed. Existing WAV caches are not deleted.
+new binary or Python dependency is needed for conversion. Cached browser copies
+are limited to 100 files across both directories; the original recordings and
+direct `audio_` cache entries are untouched. Conversion locks are scoped to a
+source version, so a slow conversion does not block cached or unrelated songs.
 Fallback stereo 48 kHz, 16-bit WAV costs about 11.5 MB per minute.
 
 Playback speed and pitch preservation still use HTMLAudioElement. Native JUCE
@@ -101,7 +105,8 @@ them as acoustic A/V calibration.
 
 Automated tests cover both cache modes, invalidation, concurrent requests,
 remux failure/timeout/empty-output fallback, cleanup after conversion failure,
-Opus/unknown headers, MIME types, byte-range responses, and source-resolution
+cache eviction, original-audio fallback, Opus/unknown headers, MIME types,
+byte-range responses, and source-resolution
 failures. JS tests cover browser capability selection and native/browser
 rerouting. `transport.js` is unchanged.
 

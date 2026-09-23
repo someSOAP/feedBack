@@ -78,8 +78,7 @@ def serve_sloppak_file(filename: str, rel_path: str, playback: str | None = None
         try:
             target = browser_playback_copy(target, appstate.audio_cache_dir, prefer_webm=playback == "webm")
         except (OSError, RuntimeError, subprocess.SubprocessError):
-            log.warning("Could not prepare seek-stable browser audio", exc_info=True)
-            return JSONResponse({"error": "Could not prepare seek-stable browser audio"}, 503)
+            log.warning("Could not prepare seek-stable browser audio; serving original", exc_info=True)
     ext = target.suffix.lower()
     mt = {
         ".ogg": "audio/ogg", ".opus": "audio/ogg", ".oga": "audio/ogg",
@@ -170,7 +169,6 @@ def serve_audio(filename: str, playback: str | None = None):
                 try:
                     candidate = browser_playback_copy(candidate, appstate.audio_cache_dir, prefer_webm=playback == "webm")
                 except (OSError, RuntimeError, subprocess.SubprocessError):
-                    log.warning("Could not prepare seek-stable browser audio", exc_info=True)
-                    return JSONResponse({"error": "Could not prepare seek-stable browser audio"}, 503)
+                    log.warning("Could not prepare seek-stable browser audio; serving original", exc_info=True)
             return FileResponse(str(candidate), media_type="audio/webm" if candidate.suffix == ".webm" else None)
     return JSONResponse({"error": "not found"}, status_code=404)
