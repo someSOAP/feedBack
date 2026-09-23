@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -14,9 +15,18 @@ from audio import _ffmpeg_cmd
 _locks_guard = threading.Lock()
 _key_locks: dict[str, tuple[threading.Lock, int]] = {}
 _eviction_lock = threading.Lock()
+_conversion_slots = threading.BoundedSemaphore(2)
+_CONVERSION_WAIT_SECONDS = 5
+_cache_recency: dict[Path, int] = {}
 _OGG_EXTENSIONS = {".ogg", ".oga", ".opus"}
 _MAX_BROWSER_COPIES = 100
 log = logging.getLogger("feedBack.lib.browser_audio")
+
+
+def _record_cache_use(path: Path) -> None:
+    """Record playback-copy use without relying on mount access-time policy."""
+    with _eviction_lock:
+        _cache_recency[path] = time.time_ns()
 
 
 @contextmanager
@@ -41,15 +51,18 @@ def _evict_browser_copies(cache_dir: Path, keep: Path) -> None:
     """Bound cached browser copies independently of the original audio cache."""
     with _eviction_lock:
         try:
+            _cache_recency[keep] = time.time_ns()
             files = [path for directory in ("browser-pcm", "browser-webm")
                      for path in (Path(cache_dir) / directory).glob("*")
                      if path.is_file() and path.suffix in (".wav", ".webm")
                      and re.fullmatch(r"[0-9a-f]{64}", path.stem)]
-            if len(files) <= _MAX_BROWSER_COPIES:
-                return
-            files.sort(key=lambda path: path.stat().st_atime_ns)
-            for path in [path for path in files if path != keep][:len(files) - _MAX_BROWSER_COPIES]:
+            files.sort(key=lambda path: _cache_recency[path] if path in _cache_recency
+                       else path.stat().st_mtime_ns)
+            for path in [path for path in files if path != keep][:max(0, len(files) - _MAX_BROWSER_COPIES)]:
                 path.unlink(missing_ok=True)
+            for path in list(_cache_recency):
+                if path.parent.parent == Path(cache_dir) and not path.is_file():
+                    del _cache_recency[path]
         except OSError:
             log.debug("Browser audio cache eviction failed for %s", cache_dir, exc_info=True)
 
@@ -113,25 +126,34 @@ def browser_playback_copy(source: Path, cache_dir: Path, *, prefer_webm: bool = 
 
     hit = cached_copy()
     if hit is not None:
+        _record_cache_use(hit)
         return hit
     # Check again after taking the key lock so concurrent requests convert once.
     with _conversion_lock(key):
         hit = cached_copy()
         if hit is not None:
+            _record_cache_use(hit)
             return hit
         ffmpeg = _ffmpeg_cmd()
         if not ffmpeg:
             raise RuntimeError("FFmpeg is required for seek-stable Ogg playback")
         cache.mkdir(parents=True, exist_ok=True)
-        if prefer_webm and _is_vorbis(source):
-            try:
-                _convert(source, remux, ffmpeg, webm=True)
-                _evict_browser_copies(cache_dir, remux)
-                return remux
-            except (OSError, RuntimeError, subprocess.SubprocessError):
-                log.warning("WebM remux failed; using PCM browser audio", exc_info=True)
-        # Cache fallback results too, so range requests don't retry a failed
-        # remux. Keep the old PCM cache/key for clients that still request it.
-        _convert(source, target, ffmpeg, webm=False)
-        _evict_browser_copies(cache_dir, target)
+        # Bound expensive FFmpeg work across different songs, but let cache hits
+        # bypass this semaphore entirely.
+        if not _conversion_slots.acquire(timeout=_CONVERSION_WAIT_SECONDS):
+            raise RuntimeError("Browser audio conversion queue is full")
+        try:
+            if prefer_webm and _is_vorbis(source):
+                try:
+                    _convert(source, remux, ffmpeg, webm=True)
+                    _evict_browser_copies(cache_dir, remux)
+                    return remux
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    log.warning("WebM remux failed; using PCM browser audio", exc_info=True)
+            # Cache fallback results too, so range requests don't retry a failed
+            # remux. Keep the old PCM cache/key for clients that still request it.
+            _convert(source, target, ffmpeg, webm=False)
+            _evict_browser_copies(cache_dir, target)
+        finally:
+            _conversion_slots.release()
     return target

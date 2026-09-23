@@ -78,7 +78,11 @@ is atomic; concurrent requests reuse one conversion. FFmpeg is required; no
 new binary or Python dependency is needed for conversion. Cached browser copies
 are limited to 100 files across both directories; the original recordings and
 direct `audio_` cache entries are untouched. Conversion locks are scoped to a
-source version, so a slow conversion does not block cached or unrelated songs.
+source version, so a slow conversion does not block cached songs. At most two
+different source versions convert at once per server process. Cache use is
+tracked explicitly on each hit, so eviction keeps frequently played copies
+even on filesystems that do not update access times. A request waiting more
+than five seconds for a conversion slot serves the original audio.
 Fallback stereo 48 kHz, 16-bit WAV costs about 11.5 MB per minute.
 
 Playback speed and pitch preservation still use HTMLAudioElement. Native JUCE

@@ -121,6 +121,50 @@ def test_different_songs_convert_concurrently(decoder, monkeypatch):
         assert second.result(timeout=5).is_file()
 
 
+def test_third_conversion_waits_for_an_ffmpeg_slot(decoder, monkeypatch):
+    """Allow two conversions while a third waits for a free FFmpeg slot."""
+    source, cache, _ = decoder
+    sources = [source, source.with_name("second.ogg"), source.with_name("third.ogg")]
+    for path in sources[1:]:
+        path.write_bytes(b"another recording")
+    decode = browser_audio.subprocess.run
+    started = {str(path): threading.Event() for path in sources}
+    release = {str(path): threading.Event() for path in sources}
+
+    def waiting_decode(args, **kwargs):
+        """Hold each decoder process until the test releases its slot."""
+        path = args[args.index("-i") + 1]
+        started[path].set()
+        assert release[path].wait(5)
+        return decode(args, **kwargs)
+
+    monkeypatch.setattr(browser_audio.subprocess, "run", waiting_decode)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        first = pool.submit(browser_audio.browser_playback_copy, sources[0], cache)
+        second = pool.submit(browser_audio.browser_playback_copy, sources[1], cache)
+        try:
+            assert started[str(sources[0])].wait(2)
+            assert started[str(sources[1])].wait(2)
+            third = pool.submit(browser_audio.browser_playback_copy, sources[2], cache)
+            assert not started[str(sources[2])].wait(0.2)
+            release[str(sources[0])].set()
+            assert started[str(sources[2])].wait(2)
+        finally:
+            for event in release.values():
+                event.set()
+        assert all(task.result(timeout=5).is_file() for task in (first, second, third))
+
+
+def test_full_conversion_queue_serves_original_audio(client, decoder, monkeypatch):
+    """Do not hold a media request indefinitely while conversion slots are busy."""
+    monkeypatch.setattr(browser_audio, "_conversion_slots", threading.BoundedSemaphore(0))
+    monkeypatch.setattr(browser_audio, "_CONVERSION_WAIT_SECONDS", 0.01)
+    response = client.get("/audio/song.ogg?playback=pcm")
+    assert response.status_code == 200
+    assert response.content == decoder[0].read_bytes()
+    assert decoder[2] == []
+
+
 def test_browser_copies_are_evicted_across_formats(vorbis, monkeypatch):
     """Keep the browser cache bounded without deleting direct audio files."""
     source, cache, _ = vorbis
@@ -140,6 +184,24 @@ def test_browser_copies_are_evicted_across_formats(vorbis, monkeypatch):
     assert newest in copies
     assert direct.read_bytes() == b"original"
     assert temporary.read_bytes() == b"unfinished"
+
+
+def test_recent_cache_hit_survives_eviction(decoder, monkeypatch):
+    """Use explicit hit recency when the underlying mount does not update atime."""
+    source, cache, calls = decoder
+    monkeypatch.setattr(browser_audio, "_MAX_BROWSER_COPIES", 2)
+    first = browser_audio.browser_playback_copy(source, cache)
+    second_source = source.with_name("second.ogg")
+    second_source.write_bytes(b"second recording")
+    second = browser_audio.browser_playback_copy(second_source, cache)
+    assert browser_audio.browser_playback_copy(source, cache) == first
+    third_source = source.with_name("third.ogg")
+    third_source.write_bytes(b"third recording")
+    third = browser_audio.browser_playback_copy(third_source, cache)
+    assert first.is_file()
+    assert third.is_file()
+    assert not second.exists()
+    assert len(calls) == 3
 
 
 def test_failed_conversion_leaves_no_partial_cache(decoder, monkeypatch):
