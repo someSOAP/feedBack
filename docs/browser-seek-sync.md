@@ -3,10 +3,10 @@
 ## Reproduction and scope
 
 Reported on macOS, Chrome 153.0.8010.50, built-in speakers, Docker-hosted
-feedBack, Rocksmith Highway visualization. Clicking a section or pressing
-Left/Right triggers the problem reliably; pause/resume alone is not established
-as its cause. The user reports roughly 100 ms, with -100 ms A/V compensation
-making it appear aligned.
+feedBack. The affected HTML audio transport is shared across visualizations.
+Clicking a section or pressing Left/Right triggers the problem reliably;
+pause/resume alone is not established as its cause. The user reports roughly
+100 ms, with -100 ms A/V compensation making it appear aligned.
 
 The active transport is HTMLAudioElement, not JUCE. Both section navigation and
 arrow keys reach `_audioSeek`, which sets the element's `currentTime`. The
